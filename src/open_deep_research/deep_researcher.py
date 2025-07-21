@@ -37,27 +37,57 @@ from open_deep_research.utils import (
     anthropic_websearch_called,
     remove_up_to_last_ai_message,
     get_api_key_for_model,
-    get_notes_from_tool_calls
+    get_base_url_for_model,
+    get_notes_from_tool_calls,
+    safe_structured_output_call
 )
 
 # Initialize a configurable model that we will use throughout the agent
 configurable_model = init_chat_model(
-    configurable_fields=("model", "max_tokens", "api_key"),
+    configurable_fields=("model", "max_tokens", "api_key", "base_url"),
 )
 
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
     configurable = Configuration.from_runnable_config(config)
     if not configurable.allow_clarification:
         return Command(goto="write_research_brief")
+
     messages = state["messages"]
     model_config = {
         "model": configurable.research_model,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
+        "base_url": get_base_url_for_model(configurable.research_model, config),
         "tags": ["langsmith:nostream"]
     }
-    model = configurable_model.with_structured_output(ClarifyWithUser).with_retry(stop_after_attempt=configurable.max_structured_output_retries).with_config(model_config)
-    response = await model.ainvoke([HumanMessage(content=clarify_with_user_instructions.format(messages=get_buffer_string(messages), date=get_today_str()))])
+
+    # Configure the model
+    model = configurable_model.with_config(model_config)
+
+    # Prepare the messages
+    clarify_messages = [HumanMessage(content=clarify_with_user_instructions.format(
+        messages=get_buffer_string(messages),
+        date=get_today_str()
+    ))]
+
+    try:
+        # Use safe structured output call with fallback mechanisms
+        response = await safe_structured_output_call(
+            model,
+            ClarifyWithUser,
+            clarify_messages,
+            max_retries=configurable.max_structured_output_retries,
+            timeout=configurable.api_timeout_seconds
+        )
+    except Exception as e:
+        print(f"Error in clarify_with_user: {e}")
+        # Fallback: assume no clarification needed and proceed
+        response = ClarifyWithUser(
+            need_clarification=False,
+            question="",
+            verification="I'll proceed with the research based on your request."
+        )
+
     if response.need_clarification:
         return Command(goto=END, update={"messages": [AIMessage(content=response.question)]})
     else:
@@ -70,15 +100,37 @@ async def write_research_brief(state: AgentState, config: RunnableConfig)-> Comm
         "model": configurable.research_model,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
+        "base_url": get_base_url_for_model(configurable.research_model, config),
         "tags": ["langsmith:nostream"]
     }
-    research_model = configurable_model.with_structured_output(ResearchQuestion).with_retry(stop_after_attempt=configurable.max_structured_output_retries).with_config(research_model_config)
-    response = await research_model.ainvoke([HumanMessage(content=transform_messages_into_research_topic_prompt.format(
+
+    # Configure the model with timeout and retry settings
+    research_model = configurable_model.with_config(research_model_config)
+
+    # Prepare the messages
+    messages = [HumanMessage(content=transform_messages_into_research_topic_prompt.format(
         messages=get_buffer_string(state.get("messages", [])),
         date=get_today_str()
-    ))])
+    ))]
+
+    try:
+        # Use safe structured output call with fallback mechanisms
+        response = await safe_structured_output_call(
+            research_model,
+            ResearchQuestion,
+            messages,
+            max_retries=configurable.max_structured_output_retries,
+            timeout=configurable.api_timeout_seconds
+        )
+    except Exception as e:
+        print(f"Error in write_research_brief: {e}")
+        # Fallback: create a basic research brief from the user's message
+        user_messages = get_buffer_string(state.get("messages", []))
+        fallback_brief = f"Research the following topic: {user_messages}"
+        response = ResearchQuestion(research_brief=fallback_brief)
+
     return Command(
-        goto="research_supervisor", 
+        goto="research_supervisor",
         update={
             "research_brief": response.research_brief,
             "supervisor_messages": {
@@ -101,6 +153,7 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
         "model": configurable.research_model,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
+        "base_url": get_base_url_for_model(configurable.research_model, config),
         "tags": ["langsmith:nostream"]
     }
     lead_researcher_tools = [ConductResearch, ResearchComplete]
@@ -204,6 +257,7 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
         "model": configurable.research_model,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
+        "base_url": get_base_url_for_model(configurable.research_model, config),
         "tags": ["langsmith:nostream"]
     }
     research_model = configurable_model.bind_tools(tools).with_retry(stop_after_attempt=configurable.max_structured_output_retries).with_config(research_model_config)
@@ -270,6 +324,7 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
         "model": configurable.compression_model,
         "max_tokens": configurable.compression_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.compression_model, config),
+        "base_url": get_base_url_for_model(configurable.compression_model, config),
         "tags": ["langsmith:nostream"]
     })
     researcher_messages = state.get("researcher_messages", [])
@@ -312,7 +367,8 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     writer_model_config = {
         "model": configurable.final_report_model,
         "max_tokens": configurable.final_report_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
+        "api_key": get_api_key_for_model(configurable.final_report_model, config),
+        "base_url": get_base_url_for_model(configurable.final_report_model, config),
     }
     
     findings = "\n".join(notes)

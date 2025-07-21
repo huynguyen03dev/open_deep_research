@@ -27,6 +27,8 @@ uv pip install -r pyproject.toml
 cp .env.example .env
 ```
 
+> **💡 Moonshot Integration**: For educational use with Moonshot models, see the [Moonshot Integration](#-moonshot-integration) section below for setup instructions using kimi-free-api.
+
 4. Launch the assistant with the LangGraph server locally to open LangGraph Studio in your browser:
 
 ```bash
@@ -64,10 +66,10 @@ Open Deep Research offers extensive configuration options to customize the resea
 
 Open Deep Research uses multiple specialized models for different research tasks:
 
-- **Summarization Model** (default: `openai:gpt-4.1-nano`): Summarizes research results from search APIs
-- **Research Model** (default: `openai:gpt-4.1`): Conducts research and analysis 
-- **Compression Model** (default: `openai:gpt-4.1-mini`): Compresses research findings from sub-agents
-- **Final Report Model** (default: `openai:gpt-4.1`): Writes the final comprehensive report
+- **Summarization Model** (default: `openai:moonshot-v1-8k`): Summarizes research results from search APIs
+- **Research Model** (default: `openai:moonshot-v1-32k`): Conducts research and analysis
+- **Compression Model** (default: `openai:moonshot-v1-8k`): Compresses research findings from sub-agents
+- **Final Report Model** (default: `openai:moonshot-v1-128k`): Writes the final comprehensive report
 
 All models are configured using [init_chat_model() API](https://python.langchain.com/docs/how_to/chat_models_universal_init/) which supports providers like OpenAI, Anthropic, Google Vertex AI, and others.
 
@@ -85,6 +87,119 @@ All models are configured using [init_chat_model() API](https://python.langchain
 4. **Special Configurations**:
    - For OpenRouter: Follow [this guide](https://github.com/langchain-ai/open_deep_research/issues/75#issuecomment-2811472408)
    - For local models via Ollama: See [setup instructions](https://github.com/langchain-ai/open_deep_research/issues/65#issuecomment-2743586318)
+
+### 🌙 Moonshot Integration
+
+> **⚠️ EDUCATIONAL DISCLAIMER**: The Moonshot integration using kimi-free-api is provided for **educational and research purposes only**. Users must comply with all applicable terms of service, legal requirements, and usage policies. This integration is not intended for commercial use or production environments. Please ensure you have proper authorization and comply with all relevant terms of service before using this integration.
+
+Open Deep Research now supports integration with Moonshot models via the [kimi-free-api](https://github.com/LLM-Red-Team/kimi-free-api/) project, which provides an OpenAI-compatible API interface for Moonshot models.
+
+#### Available Moonshot Models
+
+The application supports the following Moonshot models:
+
+- **moonshot-v1**: Base model for general tasks
+- **moonshot-v1-8k**: 8K context model (efficient for summarization and compression)
+- **moonshot-v1-32k**: 32K context model (ideal for research tasks)
+- **moonshot-v1-128k**: 128K context model (best for comprehensive final reports)
+- **moonshot-v1-vision**: Vision-capable model
+- **kimi-k2-0711-preview**: Preview model with advanced capabilities
+
+#### Default Moonshot Configuration
+
+The application is pre-configured with optimized Moonshot models for each task:
+
+| Task | Model | Context | Purpose |
+|------|-------|---------|---------|
+| **Research** | `moonshot-v1-32k` | 32K tokens | Complex research and analysis |
+| **Summarization** | `moonshot-v1-8k` | 8K tokens | Efficient search result summaries |
+| **Compression** | `moonshot-v1-8k` | 8K tokens | Research findings compression |
+| **Final Reports** | `moonshot-v1-128k` | 128K tokens | Comprehensive report generation |
+
+#### Setup Instructions
+
+**1. Set up kimi-free-api Server**
+
+First, set up the kimi-free-api server to provide an OpenAI-compatible interface:
+
+```bash
+# Clone and set up kimi-free-api (follow their documentation)
+git clone https://github.com/LLM-Red-Team/kimi-free-api.git
+cd kimi-free-api
+# Follow the setup instructions in their README
+# Start the server on localhost:8010
+```
+
+**2. Configure Environment Variables**
+
+Update your `.env` file with the following configuration:
+
+```bash
+# Moonshot API Configuration (via kimi-free-api)
+OPENAI_API_KEY=your-moonshot-api-key-here
+OPENAI_API_BASE=http://localhost:8010/v1
+
+# Search API (required for research functionality)
+TAVILY_API_KEY=your-tavily-api-key-here
+
+# Optional: Other providers (leave empty for Moonshot-only setup)
+ANTHROPIC_API_KEY=
+GOOGLE_API_KEY=
+
+# LangSmith (optional for tracing)
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=moonshot-research
+LANGSMITH_TRACING=false
+
+# Configuration source
+GET_API_KEYS_FROM_CONFIG=false
+```
+
+**3. Start the Application**
+
+```bash
+# Start the LangGraph server
+uvx --refresh --from "langgraph-cli[inmem]" --with-editable . --python 3.11 langgraph dev --allow-blocking
+```
+
+#### Troubleshooting
+
+**Common Issues and Solutions:**
+
+1. **JSON Parsing Errors**
+   - **Issue**: "ValueError: expected value at line 1 column 1"
+   - **Solution**: The application includes robust fallback mechanisms that automatically handle JSON parsing issues with local APIs
+
+2. **Model Not Found Errors**
+   - **Issue**: "服务内部错误" (Internal service error)
+   - **Solution**: Ensure your kimi-free-api server supports the specific Moonshot model and is running on the correct port
+
+3. **Connection Errors**
+   - **Issue**: Cannot connect to localhost:8010
+   - **Solution**: Verify the kimi-free-api server is running and accessible on the specified port
+
+4. **API Key Issues**
+   - **Issue**: Authentication failures
+   - **Solution**: Ensure your Moonshot API key is valid and properly configured in the kimi-free-api server
+
+**Monitoring Model Usage:**
+
+Check your server logs to confirm Moonshot models are being used:
+
+```
+✅ Good: [info] 使用模型: moonshot-v1-32k
+❌ Bad:  [error] 使用模型: gpt-4.1
+```
+
+#### Educational Use Guidelines
+
+When using this integration for educational purposes:
+
+1. **Respect Terms of Service**: Ensure compliance with all applicable terms of service
+2. **Rate Limiting**: Be mindful of API rate limits and usage quotas
+3. **Data Privacy**: Do not process sensitive or confidential information
+4. **Academic Use**: Ideal for research projects, learning, and educational demonstrations
+5. **Responsible Usage**: Use responsibly and ethically in accordance with all applicable policies
 
 #### Example MCP (Model Context Protocol) Servers
 

@@ -41,6 +41,18 @@ class Configuration(BaseModel):
             }
         }
     )
+    api_timeout_seconds: int = Field(
+        default=60,
+        metadata={
+            "x_oap_ui_config": {
+                "type": "number",
+                "default": 60,
+                "min": 10,
+                "max": 300,
+                "description": "Timeout in seconds for API calls to prevent hanging on malformed responses"
+            }
+        }
+    )
     allow_clarification: bool = Field(
         default=True,
         metadata={
@@ -107,84 +119,84 @@ class Configuration(BaseModel):
             }
         }
     )
-    # Model Configuration
+    # Model Configuration - Updated for Moonshot Models
     summarization_model: str = Field(
-        default="openai:gpt-4.1-nano",
+        default="openai:moonshot-v1-8k",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1-nano",
-                "description": "Model for summarizing research results from Tavily search results"
+                "default": "openai:moonshot-v1-8k",
+                "description": "Model for summarizing research results from Tavily search results. Using moonshot-v1-8k for efficient summarization."
             }
         }
     )
     summarization_model_max_tokens: int = Field(
-        default=8192,
+        default=4000,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
-                "default": 8192,
-                "description": "Maximum output tokens for summarization model"
+                "default": 4000,
+                "description": "Maximum output tokens for summarization model (adjusted for moonshot-v1-8k)"
             }
         }
     )
     research_model: str = Field(
-        default="openai:gpt-4.1",
+        default="openai:moonshot-v1-32k",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1",
-                "description": "Model for conducting research. NOTE: Make sure your Researcher Model supports the selected search API."
+                "default": "openai:moonshot-v1-32k",
+                "description": "Model for conducting research. Using moonshot-v1-32k for good context length and performance."
             }
         }
     )
     research_model_max_tokens: int = Field(
-        default=10000,
+        default=8000,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
-                "default": 10000,
-                "description": "Maximum output tokens for research model"
+                "default": 8000,
+                "description": "Maximum output tokens for research model (adjusted for moonshot-v1-32k)"
             }
         }
     )
     compression_model: str = Field(
-        default="openai:gpt-4.1-mini",
+        default="openai:moonshot-v1-8k",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1-mini",
-                "description": "Model for compressing research findings from sub-agents. NOTE: Make sure your Compression Model supports the selected search API."
+                "default": "openai:moonshot-v1-8k",
+                "description": "Model for compressing research findings from sub-agents. Using moonshot-v1-8k for efficient compression."
             }
         }
     )
     compression_model_max_tokens: int = Field(
-        default=8192,
+        default=4000,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
-                "default": 8192,
-                "description": "Maximum output tokens for compression model"
+                "default": 4000,
+                "description": "Maximum output tokens for compression model (adjusted for moonshot-v1-8k)"
             }
         }
     )
     final_report_model: str = Field(
-        default="openai:gpt-4.1",
+        default="openai:moonshot-v1-128k",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1",
-                "description": "Model for writing the final report from all research findings"
+                "default": "openai:moonshot-v1-128k",
+                "description": "Model for writing the final report from all research findings. Using moonshot-v1-128k for large context."
             }
         }
     )
     final_report_model_max_tokens: int = Field(
-        default=10000,
+        default=16000,
         metadata={
             "x_oap_ui_config": {
                 "type": "number",
-                "default": 10000,
-                "description": "Maximum output tokens for final report model"
+                "default": 16000,
+                "description": "Maximum output tokens for final report model (adjusted for moonshot-v1-128k)"
             }
         }
     )

@@ -3,6 +3,8 @@ import aiohttp
 import asyncio
 import logging
 import warnings
+import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, List, Literal, Dict, Optional, Any
 from langchain_core.tools import BaseTool, StructuredTool, tool, ToolException, InjectedToolArg
@@ -14,6 +16,7 @@ from tavily import AsyncTavilyClient
 from langgraph.config import get_store
 from mcp import McpError
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from pydantic import BaseModel
 from open_deep_research.state import Summary, ResearchComplete
 from open_deep_research.configuration import SearchAPI, Configuration
 from open_deep_research.prompts import summarize_webpage_prompt
@@ -62,10 +65,12 @@ async def tavily_search(
     configurable = Configuration.from_runnable_config(config)
     max_char_to_include = 50_000   # NOTE: This can be tuned by the developer. This character count keeps us safely under input token limits for the latest models.
     model_api_key = get_api_key_for_model(configurable.summarization_model, config)
+    model_base_url = get_base_url_for_model(configurable.summarization_model, config)
     summarization_model = init_chat_model(
         model=configurable.summarization_model,
         max_tokens=configurable.summarization_model_max_tokens,
         api_key=model_api_key,
+        base_url=model_base_url,
         tags=["langsmith:nostream"]
     ).with_structured_output(Summary).with_retry(stop_after_attempt=configurable.max_structured_output_retries)
     async def noop():
@@ -429,6 +434,13 @@ MODEL_TOKEN_LIMITS = {
     "ollama:llama2:13b": 4096,
     "ollama:llama2": 4096,
     "ollama:mistral": 32768,
+    # Moonshot models (local OpenAI-compatible API)
+    "openai:moonshot-v1": 8192,
+    "openai:moonshot-v1-8k": 8192,
+    "openai:moonshot-v1-32k": 32768,
+    "openai:moonshot-v1-128k": 131072,
+    "openai:moonshot-v1-vision": 8192,
+    "openai:kimi-k2-0711-preview": 32768,
 }
 
 def get_model_token_limit(model_string):
@@ -444,11 +456,168 @@ def remove_up_to_last_ai_message(messages: list[MessageLikeRepresentation]) -> l
     return messages
 
 ##########################
+# Robust API Utils
+##########################
+def is_local_api(base_url: str) -> bool:
+    """Check if the API is running locally."""
+    if not base_url:
+        return False
+    return any(host in base_url.lower() for host in ['localhost', '127.0.0.1', '0.0.0.0'])
+
+def extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
+    """Extract JSON from text that might contain other content."""
+    if not text:
+        return None
+
+    # Try to parse the entire text as JSON first
+    try:
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        pass
+
+    # Look for JSON-like patterns in the text
+    json_patterns = [
+        r'\{[^{}]*\}',  # Simple JSON object
+        r'\{.*\}',      # JSON object with nested content
+    ]
+
+    for pattern in json_patterns:
+        matches = re.findall(pattern, text, re.DOTALL)
+        for match in matches:
+            try:
+                return json.loads(match)
+            except json.JSONDecodeError:
+                continue
+
+    return None
+
+def parse_structured_response_fallback(response_text: str, expected_fields: List[str]) -> Dict[str, str]:
+    """Parse a response when structured output fails, extracting expected fields."""
+    result = {}
+
+    # Try to extract JSON first
+    json_data = extract_json_from_text(response_text)
+    if json_data:
+        for field in expected_fields:
+            if field in json_data:
+                result[field] = str(json_data[field])
+        if result:
+            return result
+
+    # Fallback to text parsing
+    text = response_text.strip()
+
+    # For single field responses, use the entire text
+    if len(expected_fields) == 1:
+        result[expected_fields[0]] = text
+        return result
+
+    # For multiple fields, try to parse based on common patterns
+    lines = text.split('\n')
+    for line in lines:
+        line = line.strip()
+        if ':' in line:
+            key, value = line.split(':', 1)
+            key = key.strip().lower().replace(' ', '_')
+            value = value.strip()
+
+            # Match field names flexibly
+            for field in expected_fields:
+                if field.lower() in key or key in field.lower():
+                    result[field] = value
+                    break
+
+    # If we still don't have all fields, use the entire text for the first field
+    if not result and expected_fields:
+        result[expected_fields[0]] = text
+
+    return result
+
+async def safe_structured_output_call(model, schema_class: type, messages: List, max_retries: int = 3, timeout: int = 60) -> Any:
+    """Safely call structured output with fallback mechanisms and timeout."""
+    base_url = getattr(model, 'base_url', None) or getattr(model, '_base_url', None)
+    is_local = is_local_api(str(base_url)) if base_url else False
+
+    # Get expected fields from the schema
+    expected_fields = []
+    if hasattr(schema_class, '__fields__'):
+        expected_fields = list(schema_class.__fields__.keys())
+    elif hasattr(schema_class, 'model_fields'):
+        expected_fields = list(schema_class.model_fields.keys())
+
+    for attempt in range(max_retries):
+        try:
+            # Try structured output first with timeout
+            structured_model = model.with_structured_output(schema_class)
+            response = await asyncio.wait_for(
+                structured_model.ainvoke(messages),
+                timeout=timeout
+            )
+            return response
+
+        except asyncio.TimeoutError:
+            print(f"Structured output attempt {attempt + 1} timed out after {timeout}s")
+            if attempt == max_retries - 1:
+                # Final timeout fallback
+                try:
+                    print("Timeout fallback: using text parsing...")
+                    text_response = await asyncio.wait_for(
+                        model.ainvoke(messages),
+                        timeout=timeout // 2
+                    )
+                    response_text = text_response.content if hasattr(text_response, 'content') else str(text_response)
+                    parsed_data = parse_structured_response_fallback(response_text, expected_fields)
+                    return schema_class(**parsed_data)
+                except Exception as timeout_fallback_error:
+                    print(f"Timeout fallback failed: {timeout_fallback_error}")
+                    raise asyncio.TimeoutError(f"All attempts timed out after {timeout}s")
+
+        except Exception as e:
+            error_str = str(e).lower()
+            is_json_error = any(term in error_str for term in [
+                'json', 'parse', 'decode', 'invalid', 'malformed', 'expected value', 'connection'
+            ])
+
+            print(f"Structured output attempt {attempt + 1} failed: {e}")
+
+            if is_json_error and (is_local or attempt == max_retries - 1):
+                # Fallback to regular text output
+                try:
+                    print("Falling back to text parsing...")
+                    text_response = await asyncio.wait_for(
+                        model.ainvoke(messages),
+                        timeout=timeout
+                    )
+                    response_text = text_response.content if hasattr(text_response, 'content') else str(text_response)
+
+                    # Parse the text response
+                    parsed_data = parse_structured_response_fallback(response_text, expected_fields)
+
+                    # Create an instance of the schema class
+                    return schema_class(**parsed_data)
+
+                except Exception as fallback_error:
+                    print(f"Fallback parsing failed: {fallback_error}")
+                    if attempt == max_retries - 1:
+                        raise e
+            elif attempt == max_retries - 1:
+                raise e
+
+            # Wait before retry with exponential backoff
+            wait_time = min(2 ** attempt, 10)  # Cap at 10 seconds
+            await asyncio.sleep(wait_time)
+
+    raise Exception(f"All {max_retries} attempts failed")
+
+##########################
 # Misc Utils
 ##########################
 def get_today_str() -> str:
     """Get current date in a human-readable format."""
-    return datetime.now().strftime("%a %b %-d, %Y")
+    # Use Windows-compatible format (no %-d on Windows)
+    now = datetime.now()
+    day = now.day
+    return now.strftime(f"%a %b {day}, %Y")
 
 def get_config_value(value):
     if value is None:
@@ -475,12 +644,37 @@ def get_api_key_for_model(model_name: str, config: RunnableConfig):
             return api_keys.get("GOOGLE_API_KEY")
         return None
     else:
-        if model_name.startswith("openai:"): 
+        if model_name.startswith("openai:"):
             return os.getenv("OPENAI_API_KEY")
         elif model_name.startswith("anthropic:"):
             return os.getenv("ANTHROPIC_API_KEY")
         elif model_name.startswith("google"):
             return os.getenv("GOOGLE_API_KEY")
+        return None
+
+def get_base_url_for_model(model_name: str, config: RunnableConfig):
+    """Get the base URL for a given model, supporting custom endpoints."""
+    should_get_from_config = os.getenv("GET_API_KEYS_FROM_CONFIG", "false")
+    model_name = model_name.lower()
+
+    if should_get_from_config.lower() == "true":
+        api_config = config.get("configurable", {}).get("apiConfig", {})
+        if not api_config:
+            return None
+        if model_name.startswith("openai:"):
+            return api_config.get("OPENAI_API_BASE")
+        elif model_name.startswith("anthropic:"):
+            return api_config.get("ANTHROPIC_API_BASE")
+        elif model_name.startswith("google"):
+            return api_config.get("GOOGLE_API_BASE")
+        return None
+    else:
+        if model_name.startswith("openai:"):
+            return os.getenv("OPENAI_API_BASE")
+        elif model_name.startswith("anthropic:"):
+            return os.getenv("ANTHROPIC_API_BASE")
+        elif model_name.startswith("google"):
+            return os.getenv("GOOGLE_API_BASE")
         return None
 
 def get_tavily_api_key(config: RunnableConfig):
